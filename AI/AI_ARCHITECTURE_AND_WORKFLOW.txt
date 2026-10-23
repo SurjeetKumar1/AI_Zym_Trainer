@@ -1,0 +1,162 @@
+================================================================================
+                    AI ZYM TRAINER - COMPLETE SYSTEM ARCHITECTURE & WORKFLOW
+================================================================================
+
+1. OVERVIEW & PURPOSE
+--------------------------------------------------------------------------------
+This AI system provides real-time fitness pose estimation, skeleton tracking,
+exercise repetition counting, and posture biomechanics monitoring.
+It connects the Next.js Frontend with the Python FastAPI AI backend via
+a low-latency bi-directional WebSocket connection.
+
+
+2. LIBRARIES USED & THEIR PURPOSES
+--------------------------------------------------------------------------------
+1. FastAPI:
+   - High-performance asynchronous Python web framework.
+   - Provides HTTP endpoints and the WebSocket endpoint (/ws/live) for live frame streaming.
+
+2. Uvicorn:
+   - Lightning-fast ASGI web server implementation.
+   - Hosts and serves the FastAPI application on http://0.0.0.0:8000.
+
+3. MediaPipe (Google):
+   - Machine learning library by Google for live computer vision tasks.
+   - Uses `mediapipe.tasks.python.vision.PoseLandmarker` to extract 33 3D body landmark points.
+
+4. OpenCV (opencv-python-headless):
+   - Computer vision library used to decode Base64 JPEG frames into BGR numpy image arrays,
+     and convert color spaces (BGR to RGB) required by MediaPipe.
+
+5. NumPy:
+   - Numerical computation library used to convert incoming image byte buffers into 
+     fast multidimensional arrays for OpenCV.
+
+
+3. PROJECT DIRECTORY STRUCTURE
+--------------------------------------------------------------------------------
+AI/
+├── main.py                                  <-- Server entry point & WebSocket handler
+├── requirements.txt                         <-- Python dependencies
+├── ml_model/
+│   └── pose_landmarker_full.task            <-- Pre-trained Google MediaPipe Pose model
+├── core/
+│   └── base_exercise.py                     <-- Base class with angle calculation & landmark helpers
+├── detectors/                               <-- Exercise biomechanics rules & rep counters
+│   ├── squat.py                             <-- Squat depth & rep counting
+│   ├── pushup.py                            <-- Push-up elbow angle & body alignment
+│   ├── biceps_curl.py                       <-- Arm curl angle & elbow drift tracking
+│   ├── shoulder_press.py                    <-- Overhead press & back arch tracking
+│   └── lunges.py                            <-- Front knee angle & torso balance
+└── services/
+    ├── config/
+    │   └── workout_config.py                <-- Exercise list & 18 skeleton bone connections
+    └── vision/
+        └── exercise_video_processor.py      <-- Core image processor & MediaPipe runner
+
+
+4. DETAILED STEP-BY-STEP WORKFLOW
+--------------------------------------------------------------------------------
+
+[STEP 1: USER CLICKS 'START LIVE MONITORING' ON FRONTEND]
+- Location: frontend/app/main/workout/page.js -> function startCamera()
+- Actions:
+  1. Calls `navigator.mediaDevices.getUserMedia()` to get camera stream.
+  2. Binds stream to HTML5 <video ref={videoRef}> element.
+  3. Calls `connectAiWebSocket()` which establishes connection to:
+     ws://localhost:8000/ws/live
+  4. Starts an interval timer running every 100 milliseconds (~10 frames/sec).
+
+[STEP 2: FRONTEND SENDS FRAME TO BACKEND]
+- Location: frontend/app/main/workout/page.js
+- Actions:
+  1. A hidden HTML5 canvas captures the current video frame (400x300 resolution).
+  2. Canvas converts image to Base64 JPEG data URL: "data:image/jpeg;base64,/9j/4AAQSk..."
+  3. WebSocket sends JSON packet:
+     {
+       "image": "data:image/jpeg;base64,...",
+       "exercise": "Squats"
+     }
+
+[STEP 3: BACKEND RECEIVES & DECODES IMAGE]
+- Location: AI/main.py -> function live_webcam_stream()
+- Actions:
+  1. Strips Base64 prefix ("data:image/jpeg;base64,").
+  2. Base64 decodes bytes -> NumPy buffer -> cv2.imdecode(nparr, cv2.IMREAD_COLOR).
+  3. Passes decoded OpenCV BGR image to:
+     `processor.process_frame(frame, exercise_name)`
+
+[STEP 4: MEDIAPIPE POSE LANDMARK DETECTION]
+- Location: AI/services/vision/exercise_video_processor.py -> process_frame()
+- Actions:
+  1. Converts frame from BGR to RGB format: `cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)`.
+  2. Wraps into MediaPipe Image object: `mp.Image(data=rgb_frame)`.
+  3. Runs model: `result = self._landmarker.detect(mp_image)`.
+  4. Detects 33 human pose landmarks (x, y, z, visibility).
+
+[STEP 5: EXERCISE DETECTOR & REPETITION COUNTING]
+- Location: AI/detectors/squat.py (or pushup.py, etc.)
+- Actions:
+  1. Evaluates knee angles using `calculate_angle(hip, knee, ankle)`.
+  2. State Machine:
+     - When knee angle drops below 100° -> stage becomes "down".
+     - When knee angle rises above 160° while stage was "down" -> stage becomes "up" and REPS += 1!
+  3. Calculates back angle and form status ("GOOD DEPTH" vs "TOO HIGH").
+
+[STEP 6: TERMINAL LOGGING]
+- Location: AI/services/vision/exercise_video_processor.py
+- Prints live telemetry to server terminal every 0.5s:
+  ⚡ [AI SKELETON MONITOR] SQUATS:
+     🔢 Reps: 3 | Stage: down
+     📊 knee_angle: 88
+     📊 back_angle: 162
+     📊 depth_status: GOOD DEPTH
+     🦴 Skeleton: 18 Bone Connections Active
+
+[STEP 7: BACKEND REPLIES TO FRONTEND VIA WEBSOCKET]
+- Location: AI/main.py -> await websocket.send_json(result)
+- Payload sent to Frontend:
+  {
+    "detected": true,
+    "exercise": "Squats",
+    "metrics": {
+      "reps": 3,
+      "stage": "down",
+      "knee_angle": 88,
+      "back_angle": 162,
+      "depth_status": "GOOD DEPTH"
+    },
+    "connections": [
+      [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+      [11, 23], [12, 24], [23, 24],
+      [23, 25], [24, 26], [25, 27], [26, 28],
+      [27, 29], [28, 30], [29, 31], [30, 32], [27, 31], [28, 32]
+    ],
+    "landmarks": [
+      {"id": 0, "x": 0.512, "y": 0.221, "vis": 0.99},
+      {"id": 11, "x": 0.442, "y": 0.351, "vis": 0.98},
+      ... 33 points
+    ]
+  }
+
+[STEP 8: FRONTEND RENDERS SKELETON & TELEMETRY]
+- Location: frontend/app/main/workout/page.js -> function drawSkeletonLines()
+- Actions:
+  1. Automatically updates Rep Counter badge on screen.
+  2. Canvas over video draws 18 glowing neon green skeleton bone lines (#00ff77).
+  3. Canvas draws blue/cyan circles at every joint vertex.
+  4. Top-left badge displays: "GOOD DEPTH" and real-time angles (Knee: 88°, Back: 162°).
+
+
+5. SUMMARY TABLE OF COMMUNICATION
+--------------------------------------------------------------------------------
+Frontend -> Backend (Every 100ms):
+  - `image`: Base64 JPEG frame
+  - `exercise`: Selected workout name ("Squats", "Push-ups", etc.)
+
+Backend -> Frontend:
+  - `detected`: Boolean flag indicating if human is visible
+  - `connections`: 18 index pairs connecting joints
+  - `landmarks`: 33 body coordinate points (x, y normalized 0.0 to 1.0)
+  - `metrics`: Rep count, stage ("up"/"down"), angle calculations, form quality
+================================================================================
